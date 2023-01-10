@@ -20,7 +20,8 @@ logging.basicConfig(
     format=">>> %(message)s",
 )
 
-
+#optim params:
+#data-measurement-cov, beta-process-lengthscale
 def parse_args():
     parser = argparse.ArgumentParser(fromfile_prefix_chars="@")
 
@@ -39,9 +40,6 @@ def parse_args():
     model_arg_group.add_argument("--sigmoid-slope", type=float, default=0.01)
     model_arg_group.add_argument(
         "--gamma", type=float, default=0.06, help="Recovery rate"
-    )
-    model_arg_group.add_argument(
-        "--eta", type=float, default=0.002, help="Mortality rate"
     )
 
     model_arg_group.add_argument("--data-measurement-cov", type=float, default=0.01)
@@ -133,7 +131,7 @@ def main():
     # Split into train and validation set
     if args.num_train is None:
         num_train = num_covid_data_points
-    elif args.num_train < 0:
+    elif args.num_train <= 0:
         num_train = num_covid_data_points + args.num_train
     else:
         num_train = args.num_train
@@ -397,7 +395,7 @@ def main():
 
         logging.info(f"Saved posterior samples to {_samples_save_file}.")
 
-    logging.info(f"\033[1mSampling took {time_sampling:.2f} seconds.\033[0m")
+        logging.info(f"\033[1mSampling took {time_sampling:.2f} seconds.\033[0m")
 
     logging.info("Computation done. Finalize")
 
