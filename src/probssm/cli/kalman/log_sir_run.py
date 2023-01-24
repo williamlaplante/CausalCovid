@@ -135,7 +135,7 @@ def main():
 
 
 
-    def get_states(beta_process_lengthscale = 75, beta_process_diffusion = 0.05, x_process_diffusion = 0.05, ode_measurement_cov = 5e-7, data_measurement_cov = 1e-8, gamma = 0.06, beta_prior_mean = 0.1, sir_0 = np.array(SIR_data[0, :3]), init_sir_vel = 1e-3, init_beta_vel = 0.0, save=False):
+    def get_states(beta_process_lengthscale = 75, beta_process_diffusion = 0.05, x_process_diffusion = 0.05, ode_measurement_cov = 5e-7, data_measurement_cov = 1e-9, gamma = 0.06, beta_prior_mean = 0.1, sir_0 = np.array(SIR_data[0, :3]), init_sir_vel = 1e-3, init_beta_vel = 0.0, save=False):
         
         forward_implementation = args.pn_forward_implementation
         backward_implementation = args.pn_backward_implementation
@@ -434,27 +434,32 @@ def main():
     beta_prior_mean = 0.5 #beta initial mean
     gamma = 0.06 #gamma parameter in the ODE model
     
+    #beta_process_lengthscale = 75, beta_process_diffusion = 0.05, x_process_diffusion = 0.05, ode_measurement_cov = 5e-7, data_measurement_cov = 1e-9, gamma = 0.06, beta_prior_mean = 0.1, sir_0 = np.array(SIR_data[0, :3]), init_sir_vel = 1e-3, init_beta_vel = 0.0, save=False
     #function to call while optimizing
-    f = lambda x1, x2 : get_states(data_measurement_cov = x1, gamma = x2) #function
     
-    for _ in range(10):
-        #expectation step
-        means, covs, lik = f(R_cov, gamma)
-        
-        #maximization step
-        R_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1)
-        #Rp = means["means"][::step, 7]
-        #R = means["means"][::step, 6] 
-        #I = means["means"][::step, 3]
-        #gamma = (Rp/np.exp(I - R)).mean()
-        logging.info(f"Current R : {R_cov}")
-        #logging.info(f"Current gamma : {gamma}")
+    f = lambda x1, x2, save : get_states(data_measurement_cov = x1,
+                                   gamma = x2,
+                                   beta_process_diffusion=0.001,
+                                   x_process_diffusion=0.001,
+                                   ode_measurement_cov = 1e-6,
+                                   save = save)
     
-    logging.info("Optimization completed.")
+    optim = True
+    if optim:
+        for _ in range(10):
+            #expectation step
+            means, covs, lik = f(R_cov, gamma, False)
+
+            #maximization step
+            R_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1)
+            logging.info(f"Current R : {R_cov}")
+            #logging.info(f"Current gamma : {gamma}")
+
+        logging.info("Optimization completed.")
     
     #Run one more time and save the states for future analysis
     logging.info("Running algorithm with estimated parameters.")
-    _, _, _ = get_states(data_measurement_cov = R_cov, gamma=gamma, save=True)
+    _, _, _ = f(R_cov, gamma, True)
     
     return
 
