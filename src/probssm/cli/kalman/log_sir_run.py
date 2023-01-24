@@ -10,6 +10,7 @@ import probnum as pn
 import scipy.linalg
 import scipy.special
 from probnum import filtsmooth, problems, randprocs, randvars
+from scipy.optimize import minimize
 
 import probssm
 
@@ -20,8 +21,7 @@ logging.basicConfig(
     format=">>> %(message)s",
 )
 
-#optim params:
-#data-measurement-cov, beta-process-lengthscale
+
 def parse_args():
     parser = argparse.ArgumentParser(fromfile_prefix_chars="@")
 
@@ -35,22 +35,16 @@ def parse_args():
     )
     data_arg_group.add_argument("--num-train", type=int, required=False)
     data_arg_group.add_argument("--num-extrapolate", type=int, default=0)
+    data_arg_group.add_argument("--skip-first", type=int, default=0)
+    data_arg_group.add_argument("--num-data-points", type=int, default=556)
 
     model_arg_group = parser.add_argument_group(title="Model Hyperparameters")
     model_arg_group.add_argument("--sigmoid-slope", type=float, default=0.01)
-    model_arg_group.add_argument(
-        "--gamma", type=float, default=0.06, help="Recovery rate"
-    )
-
-    model_arg_group.add_argument("--data-measurement-cov", type=float, default=0.01)
-    model_arg_group.add_argument("--ode-measurement-cov", type=float, default=0.0)
-
     _default_filter_stepsize = 1.0 / 24.0
-    model_arg_group.add_argument(
-        "--filter-step-size", type=float, default=_default_filter_stepsize
-    )
+    model_arg_group.add_argument("--filter-step-size", type=float, default=_default_filter_stepsize)
     model_arg_group.add_argument("--purely-mechanistic", action="store_true")
     model_arg_group.add_argument("--purely-data", action="store_true")
+    model_arg_group.add_argument("--filter-smoothing", type=int, default=1)
 
     parser.add_argument("--num-samples", type=int, default=0)
     parser.add_argument("--save-intermediate-filtering", type=int, required=False)
@@ -58,18 +52,11 @@ def parse_args():
     parser.add_argument("--pn-backward-implementation", type=str, default="sqrt")
 
     x_process_arg_group = parser.add_argument_group(title="X-process")
-    x_process_arg_group.add_argument("--x-process-diffusion", type=float, default=1.0)
     x_process_arg_group.add_argument("--x-process-ordint", type=int, default=2)
 
     beta_process_arg_group = parser.add_argument_group(title="beta-process")
-    beta_process_arg_group.add_argument("--beta-prior-mean", type=float, default=0.0)
-    beta_process_arg_group.add_argument(
-        "--beta-process-diffusion", type=float, default=1.0
-    )
+
     beta_process_arg_group.add_argument("--beta-process-ordint", type=int, default=0)
-    beta_process_arg_group.add_argument(
-        "--beta-process-lengthscale", type=float, default=1.0
-    )
 
     # Checks
     arg_namespace = parser.parse_args()
@@ -108,7 +95,7 @@ def main():
 
     # COVID-data
     day_zero, date_range_x, SIR_data, population = probssm.data.load_COVID_data(
-        country="Germany", num_data_points=556, include_death=False,
+        country="Germany", num_data_points=args.num_data_points, include_death=False, skip_first=args.skip_first,
     )
 
     num_covid_data_points = SIR_data.shape[0]
@@ -146,291 +133,330 @@ def main():
         list_lambda_predicates_test=test_set_conditions,
     )
 
-    # ##################################################################################
-    # PRIOR
-    # ##################################################################################
 
-    forward_implementation = args.pn_forward_implementation
-    backward_implementation = args.pn_backward_implementation
 
-    ode_transition = pn.randprocs.markov.integrator.IntegratedWienerTransition(
-        num_derivatives=args.x_process_ordint,
-        wiener_process_dimension=STATE_DIM,
-        forward_implementation=forward_implementation,
-        backward_implementation=backward_implementation,
-    )
+    def get_states(beta_process_lengthscale = 75, beta_process_diffusion = 0.05, x_process_diffusion = 0.05, ode_measurement_cov = 5e-7, data_measurement_cov = 1e-8, gamma = 0.06, beta_prior_mean = 0.1, sir_0 = np.array(SIR_data[0, :3]), init_sir_vel = 1e-3, init_beta_vel = 0.0, save=False):
+        
+        forward_implementation = args.pn_forward_implementation
+        backward_implementation = args.pn_backward_implementation
 
-    ode_transition._dispersion_matrix = (
-        ode_transition._dispersion_matrix * args.x_process_diffusion
-    )
+        ode_transition = pn.randprocs.markov.integrator.IntegratedWienerTransition(
+            num_derivatives=args.x_process_ordint,
+            wiener_process_dimension=STATE_DIM,
+            forward_implementation=forward_implementation,
+            backward_implementation=backward_implementation,
+        )
 
-    lf_transition = pn.randprocs.markov.integrator.MaternTransition(
-        num_derivatives=args.beta_process_ordint,
-        wiener_process_dimension=1,
-        lengthscale=args.beta_process_lengthscale,
-        forward_implementation=forward_implementation,
-        backward_implementation=backward_implementation,
-    )
+        ode_transition._dispersion_matrix = (
+            ode_transition._dispersion_matrix * x_process_diffusion
+        )
 
-    lf_transition._dispersion_matrix = (
-        lf_transition._dispersion_matrix * args.beta_process_diffusion
-    )
+        lf_transition = pn.randprocs.markov.integrator.MaternTransition(
+            num_derivatives=args.beta_process_ordint,
+            wiener_process_dimension=1,
+            lengthscale=beta_process_lengthscale,
+            forward_implementation=forward_implementation,
+            backward_implementation=backward_implementation,
+        )
 
-    prior_transition = probssm.stacked_ssm.StackedTransition(
-        transitions=(ode_transition, lf_transition),
-        forward_implementation=forward_implementation,
-        backward_implementation=backward_implementation,
-    )
+        lf_transition._dispersion_matrix = (
+            lf_transition._dispersion_matrix * beta_process_diffusion
+        )
 
-    # Set up initial conditions
+        prior_transition = probssm.stacked_ssm.StackedTransition(
+            transitions=(ode_transition, lf_transition),
+            forward_implementation=forward_implementation,
+            backward_implementation=backward_implementation,
+        )
 
-    # ##################################################################################
-    # ODE LIKELIHOOD
-    # ##################################################################################
+        # Set up initial conditions
 
-    # Link functions
+        # ##################################################################################
+        # ODE LIKELIHOOD
+        # ##################################################################################
 
-    sigmoid_x_offset = -scipy.special.logit(args.beta_prior_mean)
-    beta_link_fn = functools.partial(
-        probssm.util.sloped_sigmoid,
-        slope=args.sigmoid_slope,
-        x_offset=sigmoid_x_offset,
-    )
-    beta_link_fn_deriv = functools.partial(
-        probssm.util.d_sloped_sigmoid,
-        slope=args.sigmoid_slope,
-        x_offset=sigmoid_x_offset,
-    )
-    beta_inverse_link_fn = (
-        lambda x: (scipy.special.logit(x) + sigmoid_x_offset) / args.sigmoid_slope
-    )
+        # Link functions
 
-    assert np.isclose(
-        beta_link_fn(beta_inverse_link_fn(args.beta_prior_mean)), args.beta_prior_mean
-    )
-    assert np.isclose(beta_link_fn(0.0), args.beta_prior_mean)
+        sigmoid_x_offset = -scipy.special.logit(beta_prior_mean)
+        beta_link_fn = functools.partial(
+            probssm.util.sloped_sigmoid,
+            slope=args.sigmoid_slope,
+            x_offset=sigmoid_x_offset,
+        )
+        beta_link_fn_deriv = functools.partial(
+            probssm.util.d_sloped_sigmoid,
+            slope=args.sigmoid_slope,
+            x_offset=sigmoid_x_offset,
+        )
+        beta_inverse_link_fn = (
+            lambda x: (scipy.special.logit(x) + sigmoid_x_offset) / args.sigmoid_slope
+        )
 
-    ode_parameters = {
-        "gamma": args.gamma,
-        "population_count": population,
-    }
+        assert np.isclose(beta_link_fn(beta_inverse_link_fn(beta_prior_mean)), beta_prior_mean)
+        assert np.isclose(beta_link_fn(0.0), beta_prior_mean)
 
-    ode_likelihood = LogSIRLikelihood(
-        prior=prior_transition,
-        ode_parameters=ode_parameters,
-        beta_link_fn=beta_link_fn,
-        beta_link_fn_deriv=beta_link_fn_deriv,
-    )
+        ode_parameters = {"gamma": gamma,"population_count": population}
 
-    process_idcs = prior_transition.state_idcs
+        ode_likelihood = LogSIRLikelihood(
+            prior=prior_transition,
+            ode_parameters=ode_parameters,
+            beta_link_fn=beta_link_fn,
+            beta_link_fn_deriv=beta_link_fn_deriv,
+        )
 
-    # Mean
-    sir_0 = np.array(SIR_data[0, :3])
-    init_sir_vel = 1e-3
-    init_beta_vel = 0.0
+        process_idcs = prior_transition.state_idcs
 
-    logging.debug(f"Initial SIR mean: {np.exp(sir_0)}")
+        # Mean
 
-    init_mean = np.zeros((prior_transition.state_dimension,))
+        logging.debug(f"Initial SIR mean: {np.exp(sir_0)}")
 
-    init_mean[process_idcs[X_PROCESS_NUM]["state_d0"]] = sir_0
-    init_mean[process_idcs[X_PROCESS_NUM]["state_d1"]] = init_sir_vel
-    init_mean[process_idcs[X_PROCESS_NUM]["state_d2"]] = init_sir_vel
+        init_mean = np.zeros((prior_transition.state_dimension,))
 
-    # Set to inverse of link function
-    init_mean[process_idcs[BETA_PROCESS_NUM]["state_d0"]] = beta_inverse_link_fn(
-        args.beta_prior_mean
-    )
+        init_mean[process_idcs[X_PROCESS_NUM]["state_d0"]] = sir_0
+        init_mean[process_idcs[X_PROCESS_NUM]["state_d1"]] = init_sir_vel
+        init_mean[process_idcs[X_PROCESS_NUM]["state_d2"]] = init_sir_vel
 
-    init_mean[process_idcs[BETA_PROCESS_NUM]["state_d1"]] = init_beta_vel
+        # Set to inverse of link function
+        init_mean[process_idcs[BETA_PROCESS_NUM]["state_d0"]] = beta_inverse_link_fn(beta_prior_mean)
 
-    # Cov
-    sigma_sir = 0.001 * np.ones_like(sir_0)
+        init_mean[process_idcs[BETA_PROCESS_NUM]["state_d1"]] = init_beta_vel
 
-    # Initialize the beta process at its stationary covariance
-    stationary_beta_cov = scipy.linalg.solve_continuous_lyapunov(
-        lf_transition.drift_matrix,
-        -(lf_transition.dispersion_matrix @ lf_transition.dispersion_matrix.T),
-    )
-    sigma_beta = stationary_beta_cov[0, 0]
-    sigma_velocity = 0.001
+        # Cov
+        sigma_sir = 0.001 * np.ones_like(sir_0)
 
-    init_marginal_vars = 1e-7 * np.ones((prior_transition.state_dimension,))
-    init_marginal_vars[process_idcs[X_PROCESS_NUM]["state_d0"]] = sigma_sir
-    init_marginal_vars[process_idcs[X_PROCESS_NUM]["state_d1"]] = sigma_velocity
-    init_marginal_vars[process_idcs[X_PROCESS_NUM]["state_d2"]] = sigma_velocity
+        # Initialize the beta process at its stationary covariance
+        stationary_beta_cov = scipy.linalg.solve_continuous_lyapunov(
+            lf_transition.drift_matrix,
+            -(lf_transition.dispersion_matrix @ lf_transition.dispersion_matrix.T),
+        )
+        sigma_beta = stationary_beta_cov[0, 0]
+        sigma_velocity = 0.001
 
-    init_marginal_vars[process_idcs[BETA_PROCESS_NUM]["state_d0"]] = sigma_beta
-    init_marginal_vars[process_idcs[BETA_PROCESS_NUM]["state_d1"]] = sigma_velocity
+        init_marginal_vars = 1e-7 * np.ones((prior_transition.state_dimension,))
+        init_marginal_vars[process_idcs[X_PROCESS_NUM]["state_d0"]] = sigma_sir
+        init_marginal_vars[process_idcs[X_PROCESS_NUM]["state_d1"]] = sigma_velocity
+        init_marginal_vars[process_idcs[X_PROCESS_NUM]["state_d2"]] = sigma_velocity
 
-    init_cov = np.diag(init_marginal_vars)
+        init_marginal_vars[process_idcs[BETA_PROCESS_NUM]["state_d0"]] = sigma_beta
+        init_marginal_vars[process_idcs[BETA_PROCESS_NUM]["state_d1"]] = sigma_velocity
 
-    initrv = randvars.Normal(init_mean, init_cov)
+        init_cov = np.diag(init_marginal_vars)
 
-    time_domain = (0.0, float(num_covid_data_points + args.num_extrapolate))
-    prior_process = randprocs.markov.MarkovProcess(
-        transition=prior_transition, initrv=initrv, initarg=time_domain[0]
-    )
+        initrv = randvars.Normal(init_mean, init_cov)
+        
+        time_domain = (0.0, float(num_covid_data_points + args.num_extrapolate))
+        
+        prior_process = randprocs.markov.MarkovProcess(
+            transition=prior_transition, initrv=initrv, initarg=time_domain[0]
+        )
 
-    # Check jacobians
+        # Check jacobians
 
-    _point = (
-        prior_transition.proj2coord(proc=X_PROCESS_NUM, coord=0)
-        @ prior_transition.proj2process(X_PROCESS_NUM)
-        @ initrv.mean
-    )
-    _beta = np.array(0.3)
-    _t = 0.1
-    _m = initrv.mean
+        _point = (
+            prior_transition.proj2coord(proc=X_PROCESS_NUM, coord=0)
+            @ prior_transition.proj2process(X_PROCESS_NUM)
+            @ initrv.mean
+        )
+        _beta = np.array(0.3)
+        _t = 0.1
+        _m = initrv.mean
 
-    ode_likelihood.check_jacobians(_t, _point, _beta, _m)
+        ode_likelihood.check_jacobians(_t, _point, _beta, _m)
 
-    # ##################################################################################
-    # BUILD MODEL
-    # ##################################################################################
+        # ##################################################################################
+        # BUILD MODEL
+        # ##################################################################################
 
-    # ODE measurements
-    measurement_matrix_ode = args.ode_measurement_cov * np.eye(STATE_DIM)
-    # measurement_matrix_ode_chol_factor = np.sqrt(args.ode_measurement_cov)
-    measurement_noiserv_ode = randvars.Normal(mean=np.zeros(STATE_DIM), cov=measurement_matrix_ode)
-    measurement_model_ode = randprocs.markov.discrete.NonlinearGaussian(
-        input_dim=initrv.mean.size,
-        output_dim=STATE_DIM,
-        transition_fun=ode_likelihood.measure_ode,
-        noise_fun=lambda t: measurement_noiserv_ode,
-        transition_fun_jacobian=ode_likelihood.measure_ode_jacobian,
-    )
+        # ODE measurements
+        measurement_matrix_ode = ode_measurement_cov * np.eye(STATE_DIM)
+        measurement_noiserv_ode = randvars.Normal(mean=np.zeros(STATE_DIM), cov=measurement_matrix_ode)
+        measurement_model_ode = randprocs.markov.discrete.NonlinearGaussian(
+            input_dim=initrv.mean.size,
+            output_dim=STATE_DIM,
+            transition_fun=ode_likelihood.measure_ode,
+            noise_fun=lambda t: measurement_noiserv_ode,
+            transition_fun_jacobian=ode_likelihood.measure_ode_jacobian,
+        )
 
-    # EKF
-    linearized_measurement_model_ode = filtsmooth.gaussian.approx.DiscreteEKFComponent(
-        measurement_model_ode,
-        forward_implementation=forward_implementation,
-        backward_implementation=backward_implementation,
-    )
+        # EKF
+        linearized_measurement_model_ode = filtsmooth.gaussian.approx.DiscreteEKFComponent(
+            measurement_model_ode,
+            forward_implementation=forward_implementation,
+            backward_implementation=backward_implementation,
+        )
 
-    # Data measurements
-    measurement_matrix_data = args.data_measurement_cov * np.eye(OBSERVATION_DIM)
-    proj_state_to_S = (
-        prior_transition.proj2coord(proc=X_PROCESS_NUM, coord=0)
-        @ prior_transition.proj2process(X_PROCESS_NUM)
-    )[0:1, :]
+        # Data measurements
+        measurement_matrix_data = data_measurement_cov * np.eye(OBSERVATION_DIM)
+        proj_state_to_S = (
+            prior_transition.proj2coord(proc=X_PROCESS_NUM, coord=0)
+            @ prior_transition.proj2process(X_PROCESS_NUM)
+        )[0:1, :]
 
-    measurement_noiserv_data = randvars.Normal(mean=np.zeros(OBSERVATION_DIM), cov=measurement_matrix_data)
-    measurement_model_data = randprocs.markov.discrete.LTIGaussian(
-        transition_matrix=proj_state_to_S,
-        noise=measurement_noiserv_data,
-        forward_implementation=forward_implementation,
-        backward_implementation=backward_implementation,
-    )
+        measurement_noiserv_data = randvars.Normal(mean=np.zeros(OBSERVATION_DIM), cov=measurement_matrix_data)
+        measurement_model_data = randprocs.markov.discrete.LTIGaussian(
+            transition_matrix=proj_state_to_S,
+            noise=measurement_noiserv_data,
+            forward_implementation=forward_implementation,
+            backward_implementation=backward_implementation,
+        )
 
-    # ##################################################################################
-    # Run algorithm
-    # ##################################################################################
+        # ##################################################################################
+        # Run algorithm
+        # ##################################################################################
+        data_grid = np.array(train_idcs, copy=True, dtype=np.float64)
+        ode_grid = np.arange(*time_domain, step=args.filter_step_size, dtype=np.float64)
+        merged_locations = probssm.util.unions1d(data_grid, ode_grid)
+        
+        merged_observations = []
+        merged_measmods = []
 
-    data_grid = np.array(train_idcs, copy=True, dtype=np.float64)
-    ode_grid = np.arange(*time_domain, step=args.filter_step_size, dtype=np.float64)
+        data_idx = 0
+        ode_idx = 0
 
-    logging.info(f"Solving on time domain: t in {time_domain}")
+        for loc in merged_locations:
+            if np.in1d(loc, data_grid):
+                merged_observations.append(SIR_data[data_idx, 0:1])
+                merged_measmods.append(measurement_model_data)
+                data_idx += 1
 
-    merged_locations = probssm.util.unions1d(data_grid, ode_grid)
+            elif np.in1d(loc, ode_grid):
+                merged_observations.append(np.array(zero_data))
+                merged_measmods.append(linearized_measurement_model_ode)
+                ode_idx += 1
+            else:
+                pass
 
-    merged_observations = []
-    merged_measmods = []
+        merged_regression_problem = problems.TimeSeriesRegressionProblem(
+            observations=merged_observations,
+            locations=merged_locations,
+            measurement_models=merged_measmods,
+        )
 
-    data_idx = 0
-    ode_idx = 0
+        assert len(merged_observations) == len(merged_measmods) == len(merged_locations)
 
-    for loc in merged_locations:
-        if np.in1d(loc, data_grid):
-            merged_observations.append(SIR_data[data_idx, 0:1])
-            merged_measmods.append(measurement_model_data)
-            data_idx += 1
+        kalman_filter = filtsmooth.gaussian.Kalman(prior_process)
 
-        elif np.in1d(loc, ode_grid):
-            merged_observations.append(np.array(zero_data))
-            merged_measmods.append(linearized_measurement_model_ode)
-            ode_idx += 1
+        if args.filter_smoothing==1:
+            logging.info("Computing smoothing posterior ...")
+            start_filtsmooth = time.time()
+            posterior, _ = kalman_filter.filtsmooth(merged_regression_problem)
+            time_filtsmooth = time.time() - start_filtsmooth
+
+            logging.info(
+                f"\033[1mFiltering + Smoothing took {time_filtsmooth:.2f} seconds.\033[0m"
+            )
+
         else:
-            pass
+            logging.info("Computing filtering posterior ...")
+            start_filter = time.time()
+            posterior, _ = kalman_filter.filter(merged_regression_problem)
+            time_filter = time.time() - start_filter
 
-    logging.info(f"{data_idx} / {merged_locations.size} data locations")
-    logging.info(f"{ode_idx} / {merged_locations.size} ODE locations")
+            logging.info(
+                f"\033[1mFiltering took {time_filter:.2f} seconds.\033[0m")
 
-    merged_regression_problem = problems.TimeSeriesRegressionProblem(
-        observations=merged_observations,
-        locations=merged_locations,
-        measurement_models=merged_measmods,
-    )
 
-    assert len(merged_observations) == len(merged_measmods) == len(merged_locations)
+        means = np.stack([s.mean for s in posterior.states])
+        covs = np.stack([s.cov for s in posterior.states])
 
-    kalman_filter = filtsmooth.gaussian.Kalman(prior_process)
+        lik = 0
+        data_idx = 0
 
-    logging.info("Computing smoothing posterior ...")
-    start_filtsmooth = time.time()
-    posterior, _ = kalman_filter.filtsmooth(merged_regression_problem)
-    time_filtsmooth = time.time() - start_filtsmooth
+        for i,loc in enumerate(merged_locations):
+            if np.in1d(loc, data_grid):
+                #lik+=np.exp(means[i,0]) - means[i,0] * np.exp(SIR_data[data_idx, 0])
+                lik+= np.abs(means[i,0] - SIR_data[data_idx,0])
+                data_idx += 1
+        lik /= len(SIR_data[:,0])
+        logging.info("Poisson Loss : {}".format(lik))
+        
+        
+        if args.num_samples is not None and args.num_samples > 0:
+            logging.info(f"Drawing {args.num_samples} samples from posterior...")
 
-    logging.info(
-        f"\033[1mFiltering + Smoothing took {time_filtsmooth:.2f} seconds.\033[0m"
-    )
+            start_sampling = time.time()
+            samples = posterior.sample(rng=rng, size=args.num_samples)
+            time_sampling = time.time() - start_sampling
 
-    _posterior_save_file = log_dir / "smoothing_posterior_first.npz"
+            _samples_save_file = log_dir / "posterior_samples.npy"
+            np.save(_samples_save_file, samples)
 
-    np.savez(
-        _posterior_save_file,
-        means=np.stack([s.mean for s in posterior.states]),
-        covs=np.stack([s.cov for s in posterior.states]),
-    )
+            logging.info(f"Saved posterior samples to {_samples_save_file}.")
 
-    if args.num_samples is not None and args.num_samples > 0:
-        logging.info(f"Drawing {args.num_samples} samples from posterior...")
+            logging.info(f"\033[1mSampling took {time_sampling:.2f} seconds.\033[0m")
+        
+        
+        if save:
+            _posterior_save_file = log_dir / "posterior_first.npz" 
+            np.savez(_posterior_save_file,means=means,covs=covs)
+            
+            projections_dict = {
+            "E_x": prior_transition.proj2process(X_PROCESS_NUM),
+            "E_beta": prior_transition.proj2process(BETA_PROCESS_NUM),
+            "E0_x": prior_transition.proj2coord(proc=X_PROCESS_NUM, coord=0),
+            "E0_beta": prior_transition.proj2coord(proc=BETA_PROCESS_NUM, coord=0),
+            }
+            _projections_save_file = log_dir / "projections.npz"
+            np.savez(_projections_save_file, **projections_dict)
+            logging.info(f"Saved projections matrices to {_projections_save_file}.")
 
-        start_sampling = time.time()
-        samples = posterior.sample(rng=rng, size=args.num_samples)
-        time_sampling = time.time() - start_sampling
+            data_dict = {
+                "sir_data": np.exp(SIR_data),
+                "day_zero": day_zero.to_numpy(),
+                "date_range_x": np.array([ts.to_numpy() for ts in date_range_x]),
+                "time_domain": np.array(time_domain),
+                "data_grid": data_grid,
+                "ode_grid": ode_grid,
+                "dense_grid": merged_locations,
+                "train_idcs": train_idcs,
+                "val_idcs": val_idcs,
+                "beta_prior_mean" : beta_prior_mean,
+            }
+            _data_info_save_file = log_dir / "data_info.npz"
+            np.savez(_data_info_save_file, **data_dict)
+            logging.info(f"Saved data info to {_data_info_save_file}.")
 
-        _samples_save_file = log_dir / "posterior_samples.npy"
-        np.save(_samples_save_file, samples)
+            info = {}
+            _args_save_file = log_dir / "info.json"
+            probssm.args_to_json(_args_save_file, args=args, kwargs=info)
+            logging.info(f"Saved info dict to {_args_save_file}.")
 
-        logging.info(f"Saved posterior samples to {_samples_save_file}.")
-
-        logging.info(f"\033[1mSampling took {time_sampling:.2f} seconds.\033[0m")
-
-    logging.info("Computation done. Finalize")
-
-    # ##################################################################################
-    # Finalize
-    # ##################################################################################
-    projections_dict = {
-        "E_x": prior_transition.proj2process(X_PROCESS_NUM),
-        "E_beta": prior_transition.proj2process(BETA_PROCESS_NUM),
-        "E0_x": prior_transition.proj2coord(proc=X_PROCESS_NUM, coord=0),
-        "E0_beta": prior_transition.proj2coord(proc=BETA_PROCESS_NUM, coord=0),
-    }
-    _projections_save_file = log_dir / "projections.npz"
-    np.savez(_projections_save_file, **projections_dict)
-    logging.info(f"Saved projections matrices to {_projections_save_file}.")
-
-    data_dict = {
-        "sir_data": np.exp(SIR_data),
-        "day_zero": day_zero.to_numpy(),
-        "date_range_x": np.array([ts.to_numpy() for ts in date_range_x]),
-        "time_domain": np.array(time_domain),
-        "data_grid": data_grid,
-        "ode_grid": ode_grid,
-        "dense_grid": merged_locations,
-        "train_idcs": train_idcs,
-        "val_idcs": val_idcs,
-    }
-    _data_info_save_file = log_dir / "data_info.npz"
-    np.savez(_data_info_save_file, **data_dict)
-    logging.info(f"Saved data info to {_data_info_save_file}.")
-
-    info = {}
-    _args_save_file = log_dir / "info.json"
-    probssm.args_to_json(_args_save_file, args=args, kwargs=info)
-    logging.info(f"Saved info dict to {_args_save_file}.")
+        
+        return means, covs, lik
+    
+    #EM algorithm
+    
+    #hyperparameters
+    step = 1+int(1/args.filter_step_size)
+    
+    #parameters
+    R_cov = 1e-8 #data measurement cov initial parameter
+    beta_prior_mean = 0.5 #beta initial mean
+    gamma = 0.06 #gamma parameter in the ODE model
+    
+    #function to call while optimizing
+    f = lambda x1, x2 : get_states(data_measurement_cov = x1, gamma = x2) #function
+    
+    for _ in range(10):
+        #expectation step
+        means, covs, lik = f(R_cov, gamma)
+        
+        #maximization step
+        R_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1)
+        #Rp = means["means"][::step, 7]
+        #R = means["means"][::step, 6] 
+        #I = means["means"][::step, 3]
+        #gamma = (Rp/np.exp(I - R)).mean()
+        logging.info(f"Current R : {R_cov}")
+        #logging.info(f"Current gamma : {gamma}")
+    
+    logging.info("Optimization completed.")
+    
+    #Run one more time and save the states for future analysis
+    logging.info("Running algorithm with estimated parameters.")
+    _, _, _ = get_states(data_measurement_cov = R_cov, gamma=gamma, save=True)
+    
+    return
 
 
 if __name__ == "__main__":

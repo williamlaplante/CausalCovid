@@ -9,7 +9,7 @@ JHU_CSV_URL = "https://raw.githubusercontent.com/datasets/covid-19/main/data/cou
 UN_POPULATION_CSV_URL = "https://raw.githubusercontent.com/owid/covid-19-data/152b2236a32f889df3116c7121d9bb14ce2ff2a8/scripts/input/un/population_2020.csv"
 
 
-def load_COVID_data(country, num_data_points=None, include_death=True):
+def load_COVID_data(country, num_data_points=None, include_death=True, skip_first=0):
 
     # Population
     population_df = pd.read_csv(
@@ -25,6 +25,7 @@ def load_COVID_data(country, num_data_points=None, include_death=True):
     cases_df = pd.read_csv(JHU_CSV_URL)
     cases_df["Date"] = pd.to_datetime(cases_df["Date"])
     cases_df = cases_df.loc[cases_df["Country"] == country]
+    cases_df = cases_df.iloc[skip_first:, :]
 
     day_zero = cases_df["Date"].iloc[0]
 
