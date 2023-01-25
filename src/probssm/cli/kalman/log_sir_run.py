@@ -10,7 +10,7 @@ import probnum as pn
 import scipy.linalg
 import scipy.special
 from probnum import filtsmooth, problems, randprocs, randvars
-from scipy.optimize import minimize
+from scipy.optimize import minimize_scalar
 
 import probssm
 
@@ -411,6 +411,7 @@ def main():
                 "train_idcs": train_idcs,
                 "val_idcs": val_idcs,
                 "beta_prior_mean" : beta_prior_mean,
+                "gamma" : gamma,
             }
             _data_info_save_file = log_dir / "data_info.npz"
             np.savez(_data_info_save_file, **data_dict)
@@ -428,33 +429,77 @@ def main():
     
     #hyperparameters
     step = 1+int(1/args.filter_step_size)
+    beta_prior_mean = 0.1 #initial conditions for beta
     
+
     #parameters
     R_cov = 1e-8 #data measurement cov initial parameter
-    beta_prior_mean = 0.5 #beta initial mean
-    gamma = 0.06 #gamma parameter in the ODE model
+    gamma = 0.07 #gamma parameter in the ODE model
     
+    #Useful functions  
+    def opt_func(gamma, data, means):
+        #Optimization function for gamma parameter optimization.
+        start_idx = 150
+        end_idx = 500
+        logI = means[:, 3]
+        I = np.exp(logI)
+        logIp = means[:, 4]
+        Ip = I * logIp
+        beta = means[:, 9]
+        data = np.exp(data[start_idx:end_idx, 0])
+        
+        x_offset = -scipy.special.logit(beta_prior_mean)
+        y_offset = 0.0
+        slope = args.sigmoid_slope
+        
+        beta_link = scipy.special.expit(slope * (beta - x_offset)) + y_offset
+        
+        S_gamma = (1000*(gamma*I + Ip)/(beta_link*I)).reshape(-1, step).mean(axis=1)[start_idx:end_idx]
+        
+        #Compute sqrt( sum ( (S - S(gamma))**2 ) )
+        return np.sqrt( ( (data - S_gamma)**2 ).sum() )
+
     #beta_process_lengthscale = 75, beta_process_diffusion = 0.05, x_process_diffusion = 0.05, ode_measurement_cov = 5e-7, data_measurement_cov = 1e-9, gamma = 0.06, beta_prior_mean = 0.1, sir_0 = np.array(SIR_data[0, :3]), init_sir_vel = 1e-3, init_beta_vel = 0.0, save=False
     #function to call while optimizing
     
     f = lambda x1, x2, save : get_states(data_measurement_cov = x1,
                                    gamma = x2,
-                                   beta_process_diffusion=0.001,
-                                   x_process_diffusion=0.001,
-                                   ode_measurement_cov = 1e-6,
+                                   beta_process_diffusion=0.01,
+                                   x_process_diffusion=0.01,
+                                   ode_measurement_cov = 5e-7,
+                                   beta_prior_mean = beta_prior_mean,
                                    save = save)
     
     optim = True
     if optim:
+        #First, we optimize R
+        logging.info(f"Initial R : {R_cov}")
+        for _ in range(6):
+            #expectation step
+            means, covs, lik = f(R_cov, gamma, False)
+            #maximization step
+            R_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1) #MLE for R -> Maximizes likelihood
+            logging.info(f"Current R : {R_cov}")
+        
+        
+        #Second, we optimize gamma
+        logging.info(f"Initial gamma : {gamma}")
         for _ in range(10):
             #expectation step
             means, covs, lik = f(R_cov, gamma, False)
-
             #maximization step
-            R_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1)
-            logging.info(f"Current R : {R_cov}")
-            #logging.info(f"Current gamma : {gamma}")
+            logR = means[:, 6]
+            R = np.exp(logR)
+            logRp = means[:, 7]
+            Rp = R * logRp
+            logI = means[:, 3]
+            I = np.exp(logI)
+            gamma = np.median(Rp/I)
 
+            
+            #gamma = minimize_scalar(opt_func,bracket=[0.01, 0.1], args=(SIR_data,means)).x #Maximize Likelihood w.r.t. gamma
+            logging.info(f"Gamma : {gamma}")
+        
         logging.info("Optimization completed.")
     
     #Run one more time and save the states for future analysis
