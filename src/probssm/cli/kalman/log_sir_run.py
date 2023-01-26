@@ -429,12 +429,13 @@ def main():
     
     #hyperparameters
     step = 1+int(1/args.filter_step_size)
-    beta_prior_mean = 0.1 #initial conditions for beta
-    
+    beta_prior_mean = 0.06 #initial conditions for beta
+    lengthscale = 72
 
     #parameters
     R_cov = 1e-8 #data measurement cov initial parameter
-    gamma = 0.07 #gamma parameter in the ODE model
+    R_cov = 2.1850075914352873e-09 #REMOVE THIS LINE OF CODE!!!
+    gamma = 0.065 #gamma parameter in the ODE model
     
     #Useful functions  
     def opt_func(gamma, data, means):
@@ -468,13 +469,14 @@ def main():
                                    x_process_diffusion=0.01,
                                    ode_measurement_cov = 5e-7,
                                    beta_prior_mean = beta_prior_mean,
+                                   beta_process_lengthscale = lengthscale,
                                    save = save)
     
     optim = True
     if optim:
         #First, we optimize R
         logging.info(f"Initial R : {R_cov}")
-        for _ in range(6):
+        for _ in range(0):
             #expectation step
             means, covs, lik = f(R_cov, gamma, False)
             #maximization step
@@ -484,7 +486,7 @@ def main():
         
         #Second, we optimize gamma
         logging.info(f"Initial gamma : {gamma}")
-        for _ in range(10):
+        for _ in range(0):
             #expectation step
             means, covs, lik = f(R_cov, gamma, False)
             #maximization step
