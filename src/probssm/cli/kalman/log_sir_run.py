@@ -429,12 +429,11 @@ def main():
     
     #hyperparameters
     step = 1+int(1/args.filter_step_size)
-    beta_prior_mean = 0.06 #initial conditions for beta
-    lengthscale = 72
+    beta_prior_mean = 0.065 #initial conditions for beta -> best gamma : 0.06916513165731976
+    lengthscale = 72 # 72 hours = 3 * 24h = 3 days
 
     #parameters
     R_cov = 1e-8 #data measurement cov initial parameter
-    R_cov = 2.1850075914352873e-09 #REMOVE THIS LINE OF CODE!!!
     gamma = 0.065 #gamma parameter in the ODE model
     
     #Useful functions  
@@ -472,37 +471,52 @@ def main():
                                    beta_process_lengthscale = lengthscale,
                                    save = save)
     
+    
     optim = True
+    
     if optim:
-        #First, we optimize R
-        logging.info(f"Initial R : {R_cov}")
-        for _ in range(0):
-            #expectation step
-            means, covs, lik = f(R_cov, gamma, False)
-            #maximization step
-            R_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1) #MLE for R -> Maximizes likelihood
-            logging.info(f"Current R : {R_cov}")
         
-        
-        #Second, we optimize gamma
-        logging.info(f"Initial gamma : {gamma}")
-        for _ in range(0):
-            #expectation step
-            means, covs, lik = f(R_cov, gamma, False)
-            #maximization step
-            logR = means[:, 6]
-            R = np.exp(logR)
-            logRp = means[:, 7]
-            Rp = R * logRp
-            logI = means[:, 3]
-            I = np.exp(logI)
-            gamma = np.median(Rp/I)
-
+        total_optim_step = 0
+        while True:
             
-            #gamma = minimize_scalar(opt_func,bracket=[0.01, 0.1], args=(SIR_data,means)).x #Maximize Likelihood w.r.t. gamma
-            logging.info(f"Gamma : {gamma}")
-        
-        logging.info("Optimization completed.")
+            #First, we optimize R
+            logging.info(f"Initial R : {R_cov}")
+            for _ in range(6): #6 iterations is usually fine
+                #expectation step
+                means, covs, lik = f(R_cov, gamma, False)
+                #maximization step
+                R_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1) #MLE for R -> Maximizes likelihood
+                logging.info(f"Current R : {R_cov}")
+
+
+            #Second, we optimize gamma
+            logging.info(f"Initial gamma : {gamma}")
+            for _ in range(100):
+                #expectation step
+                means, covs, lik = f(R_cov, gamma, False)
+                #maximization step
+
+                #method 1 : Use Rp / I
+                
+                logR = means[:, 6]
+                R = np.exp(logR)
+                logRp = means[:, 7]
+                Rp = R * logRp
+                logI = means[:, 3]
+                I = np.exp(logI)
+                #gamma = np.median(Rp/I)
+                gamma = (Rp * I).sum() / (I**2).sum()
+                #method 2 : Use the likelihood via S(gamma)
+                """
+                gamma = minimize_scalar(opt_func,bracket=[0.01, 0.1], args=(SIR_data,means)).x #Maximize Likelihood w.r.t. gamma
+                """
+
+                logging.info(f"Gamma : {gamma}")
+                
+            total_optim_step+=1
+
+
+    logging.info("Optimization completed.")
     
     #Run one more time and save the states for future analysis
     logging.info("Running algorithm with estimated parameters.")
