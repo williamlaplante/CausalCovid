@@ -11,6 +11,7 @@ import scipy.linalg
 import scipy.special
 from probnum import filtsmooth, problems, randprocs, randvars
 from scipy.optimize import minimize_scalar
+from scipy import stats
 
 import probssm
 
@@ -95,7 +96,7 @@ def main():
 
     # COVID-data
     day_zero, date_range_x, SIR_data, population = probssm.data.load_COVID_data(
-        country="Germany", num_data_points=args.num_data_points, include_death=False, skip_first=args.skip_first,
+        country=args.country, num_data_points=args.num_data_points, include_death=False, skip_first=args.skip_first,
     )
 
     num_covid_data_points = SIR_data.shape[0]
@@ -140,6 +141,7 @@ def main():
         forward_implementation = args.pn_forward_implementation
         backward_implementation = args.pn_backward_implementation
 
+        #Specify 
         ode_transition = pn.randprocs.markov.integrator.IntegratedWienerTransition(
             num_derivatives=args.x_process_ordint,
             wiener_process_dimension=STATE_DIM,
@@ -339,7 +341,7 @@ def main():
         if args.filter_smoothing==1:
             logging.info("Computing smoothing posterior ...")
             start_filtsmooth = time.time()
-            posterior, _ = kalman_filter.filtsmooth(merged_regression_problem)
+            posterior, filtering_info_dicts = kalman_filter.filtsmooth(merged_regression_problem)
             time_filtsmooth = time.time() - start_filtsmooth
 
             logging.info(
@@ -349,7 +351,7 @@ def main():
         else:
             logging.info("Computing filtering posterior ...")
             start_filter = time.time()
-            posterior, _ = kalman_filter.filter(merged_regression_problem)
+            posterior, filtering_info_dicts = kalman_filter.filter(merged_regression_problem)
             time_filter = time.time() - start_filter
 
             logging.info(
@@ -361,14 +363,17 @@ def main():
 
         lik = 0
         data_idx = 0
-
+        
         for i,loc in enumerate(merged_locations):
             if np.in1d(loc, data_grid):
                 #lik+=np.exp(means[i,0]) - means[i,0] * np.exp(SIR_data[data_idx, 0])
-                lik+= np.abs(means[i,0] - SIR_data[data_idx,0])
+                #lik+= np.abs(means[i,0] - SIR_data[data_idx,0])
+
+                lik += stats.norm.logpdf(SIR_data[data_idx,0],
+                                         loc=means[i,0],
+                                         scale=np.sqrt(covs[i,0,0]))
                 data_idx += 1
-        lik /= len(SIR_data[:,0])
-        logging.info("Poisson Loss : {}".format(lik))
+        #lik /= len(SIR_data[:,0])
         
         
         if args.num_samples is not None and args.num_samples > 0:
@@ -417,26 +422,56 @@ def main():
             np.savez(_data_info_save_file, **data_dict)
             logging.info(f"Saved data info to {_data_info_save_file}.")
 
+            _filtering_info_save_file = log_dir / "filtering_info.npz"
+            np.savez(_filtering_info_save_file, filtering_info_dicts)
+            logging.info(f"Saved filtering info to {_filtering_info_save_file}.")
+
             info = {}
             _args_save_file = log_dir / "info.json"
             probssm.args_to_json(_args_save_file, args=args, kwargs=info)
             logging.info(f"Saved info dict to {_args_save_file}.")
-
-        
+   
         return means, covs, lik
     
     #EM algorithm
     
     #hyperparameters
+    assert np.isclose(args.filter_step_size, 1/24)
     step = 1+int(1/args.filter_step_size)
-    beta_prior_mean = 0.065 #initial conditions for beta -> best gamma : 0.06916513165731976
+ 
+    beta_prior_mean = 0.1 #initial conditions for beta
     lengthscale = 72 # 72 hours = 3 * 24h = 3 days
 
     #parameters
-    R_cov = 1e-8 #data measurement cov initial parameter
-    gamma = 0.065 #gamma parameter in the ODE model
+    #R_cov = 1e-8 #data measurement cov initial parameter
+    R_cov = 1e-6
+    Q_cov = 1e-4
+    
+    gamma = 1/22.14 #gamma parameter in the ODE model
     
     #Useful functions  
+    
+    def transformed_states(arr):
+        logS = arr[:, 0]
+        S = np.exp(logS)
+        logSp = arr[:, 1]
+        Sp = S * logSp
+        logI = arr[:, 3]
+        I = np.exp(logI)
+        logIp = arr[:, 4]
+        Ip = I * logIp
+        logR = arr[:, 6]
+        R = np.exp(logR)
+        logRp = arr[:, 7]
+        Rp = R * logRp
+        beta = arr[:, 9]
+        x_offset = -scipy.special.logit(beta_prior_mean)
+        y_offset = 0.0
+        slope = args.sigmoid_slope
+        beta_link = scipy.special.expit(slope * (beta - x_offset)) + y_offset
+        return [S, Sp, I, Ip, R, Rp, beta]
+    
+    
     def opt_func(gamma, data, means):
         #Optimization function for gamma parameter optimization.
         start_idx = 150
@@ -462,11 +497,11 @@ def main():
     #beta_process_lengthscale = 75, beta_process_diffusion = 0.05, x_process_diffusion = 0.05, ode_measurement_cov = 5e-7, data_measurement_cov = 1e-9, gamma = 0.06, beta_prior_mean = 0.1, sir_0 = np.array(SIR_data[0, :3]), init_sir_vel = 1e-3, init_beta_vel = 0.0, save=False
     #function to call while optimizing
     
-    f = lambda x1, x2, save : get_states(data_measurement_cov = x1,
+    f = lambda x1, x2, x3, save : get_states(data_measurement_cov = x1,
                                    gamma = x2,
-                                   beta_process_diffusion=0.01,
-                                   x_process_diffusion=0.01,
-                                   ode_measurement_cov = 5e-7,
+                                   beta_process_diffusion=0.05,#0.01
+                                   x_process_diffusion=0.05,#0.01
+                                   ode_measurement_cov = x3,#5e-7
                                    beta_prior_mean = beta_prior_mean,
                                    beta_process_lengthscale = lengthscale,
                                    save = save)
@@ -477,42 +512,64 @@ def main():
     if optim:
         
         total_optim_step = 0
-        while True:
+        while total_optim_step<1:
             
             #First, we optimize R
             logging.info(f"Initial R : {R_cov}")
-            for _ in range(6): #6 iterations is usually fine
-                #expectation step
-                means, covs, lik = f(R_cov, gamma, False)
-                #maximization step
-                R_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1) #MLE for R -> Maximizes likelihood
-                logging.info(f"Current R : {R_cov}")
-
-
-            #Second, we optimize gamma
+            logging.info(f"Initial Q : {Q_cov}")
             logging.info(f"Initial gamma : {gamma}")
-            for _ in range(100):
-                #expectation step
-                means, covs, lik = f(R_cov, gamma, False)
-                #maximization step
+            
+            for _ in range(3):
+                
+                for _ in range(4): #6 iterations is usually fine
+                    #expectation step
+                    means, covs, lik = f(R_cov, gamma, Q_cov, False)
+                    #maximization step
+                    #R_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1) #MLE for R -> Maximizes likelihood
+                    R_cov = (covs[::step, 0,0] + means[::step, 0]**2 - 2*SIR_data[:,0]*means[::step,0] + SIR_data[:,0]**2).mean()
 
+                    logging.info(f"Current R : {R_cov}")
+                    logging.info(f"Current Q : {Q_cov}")
+                    logging.info(f"Current Log Likelihood : {lik}")
+
+
+
+                #Second, we optimize Q
+                for _ in range(4):
+                    #expectation step
+                    means, covs, lik = f(R_cov, gamma, Q_cov, False)
+
+                    Q_cov = covs[:,[2,5,8],[2,5,8]].mean() #sample average of lambda from GP of x''(t)
+
+                    logging.info(f"Current R : {R_cov}")
+                    logging.info(f"Current Q : {Q_cov}")
+                    logging.info(f"Current Log Likelihood : {lik}")
+                
+                
+            '''
+            #Second, we optimize gamma 
+            for _ in range(10):
+                #expectation step
+                means, covs, lik = f(R_cov, gamma, Q_cov, False)
+                
+                #maximization step
+                gamma_func = lambda x : f(R_cov, x, False)[2]
                 #method 1 : Use Rp / I
                 
-                logR = means[:, 6]
-                R = np.exp(logR)
-                logRp = means[:, 7]
-                Rp = R * logRp
-                logI = means[:, 3]
-                I = np.exp(logI)
-                #gamma = np.median(Rp/I)
-                gamma = (Rp * I).sum() / (I**2).sum()
-                #method 2 : Use the likelihood via S(gamma)
-                """
-                gamma = minimize_scalar(opt_func,bracket=[0.01, 0.1], args=(SIR_data,means)).x #Maximize Likelihood w.r.t. gamma
-                """
-
-                logging.info(f"Gamma : {gamma}")
                 
+                S, Sp, I, Ip, R, Rp, beta_link = transformed_states(means)
+                gamma = np.median(Rp/I)
+                logging.info(f"Current gamma : {gamma}")
+                
+                #gamma = (Rp * I).sum() / (I**2).sum()
+                #method 2 : Use the likelihood via S(gamma)
+                
+                
+                #gamma = minimize_scalar(gamma_func, bracket=[0.06, 0.07], method="brent").x
+                
+                #gamma = minimize_scalar(gamma_func,bracket=[0.05, 0.08], args=(SIR_data,means)).x #Maximize Likelihood w.r.t. gamma
+                '''
+                            
             total_optim_step+=1
 
 
@@ -520,7 +577,7 @@ def main():
     
     #Run one more time and save the states for future analysis
     logging.info("Running algorithm with estimated parameters.")
-    _, _, _ = f(R_cov, gamma, True)
+    _, _, _ = f(R_cov, gamma, Q_cov, True)
     
     return
 

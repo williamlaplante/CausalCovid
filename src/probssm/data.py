@@ -8,6 +8,8 @@ import pandas as pd
 JHU_CSV_URL = "https://raw.githubusercontent.com/datasets/covid-19/main/data/countries-aggregated.csv"
 UN_POPULATION_CSV_URL = "https://raw.githubusercontent.com/owid/covid-19-data/152b2236a32f889df3116c7121d9bb14ce2ff2a8/scripts/input/un/population_2020.csv"
 
+CAN_TIMELINE_URL = "https://raw.githubusercontent.com/ccodwg/CovidTimelineCanada/main/data/can/cases_can.csv"
+
 
 def load_COVID_data(country, num_data_points=None, include_death=True, skip_first=0):
 
@@ -22,12 +24,23 @@ def load_COVID_data(country, num_data_points=None, include_death=True, skip_firs
     population = float(population_df["population"])
 
     # COVID data
-    cases_df = pd.read_csv(JHU_CSV_URL)
-    cases_df["Date"] = pd.to_datetime(cases_df["Date"])
-    cases_df = cases_df.loc[cases_df["Country"] == country]
-    cases_df = cases_df.iloc[skip_first:, :]
+    
+    if country == "Canada":
+        logging.info(f"Retrieving Canadian data from {CAN_TIMELINE_URL}.")
+        cases_df = pd.read_csv(CAN_TIMELINE_URL)
+        cases_df["date"] = pd.to_datetime(cases_df["date"])
+        day_zero = cases_df["date"].iloc[0]
+        cases_df = cases_df.rename({"date":"Date", "value":"Confirmed", "value_daily":"Confirmed_daily"}, axis=1)
+        cases_df["Recovered"] = 0
+        cases_df["Deaths"] = 0
 
-    day_zero = cases_df["Date"].iloc[0]
+    else:
+        cases_df = pd.read_csv(JHU_CSV_URL)
+        cases_df["Date"] = pd.to_datetime(cases_df["Date"])
+        cases_df = cases_df.loc[cases_df["Country"] == country]
+        cases_df = cases_df.iloc[skip_first:, :]
+
+        day_zero = cases_df["Date"].iloc[0]
 
     def count_days(date, start):
         return (date - start).days
