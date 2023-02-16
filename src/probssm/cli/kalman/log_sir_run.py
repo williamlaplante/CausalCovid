@@ -399,8 +399,11 @@ def main():
             "E_x": prior_transition.proj2process(X_PROCESS_NUM),
             "E_beta": prior_transition.proj2process(BETA_PROCESS_NUM),
             "E0_x": prior_transition.proj2coord(proc=X_PROCESS_NUM, coord=0),
+            "E1_x": prior_transition.proj2coord(proc=X_PROCESS_NUM, coord=1),
             "E0_beta": prior_transition.proj2coord(proc=BETA_PROCESS_NUM, coord=0),
+            "E1_beta": prior_transition.proj2coord(proc=BETA_PROCESS_NUM, coord=1),
             }
+            
             _projections_save_file = log_dir / "projections.npz"
             np.savez(_projections_save_file, **projections_dict)
             logging.info(f"Saved projections matrices to {_projections_save_file}.")
@@ -417,6 +420,12 @@ def main():
                 "val_idcs": val_idcs,
                 "beta_prior_mean" : beta_prior_mean,
                 "gamma" : gamma,
+                "population" : population,
+                "beta_process_diffusion" : beta_process_diffusion,
+                "x_process_diffusion" : x_process_diffusion,
+                "data_measurement_cov" : data_measurement_cov,
+                "ode_measurement_cov" : ode_measurement_cov,
+                
             }
             _data_info_save_file = log_dir / "data_info.npz"
             np.savez(_data_info_save_file, **data_dict)
@@ -443,9 +452,8 @@ def main():
     lengthscale = 72 # 72 hours = 3 * 24h = 3 days
 
     #parameters
-    #R_cov = 1e-8 #data measurement cov initial parameter
-    R_cov = 1e-6
-    Q_cov = 1e-4
+    R_cov = 1.0098897572165454e-08
+    Q_cov = 2.0345311243958814e-05
     
     gamma = 1/22.14 #gamma parameter in the ODE model
     
@@ -470,44 +478,20 @@ def main():
         slope = args.sigmoid_slope
         beta_link = scipy.special.expit(slope * (beta - x_offset)) + y_offset
         return [S, Sp, I, Ip, R, Rp, beta]
-    
-    
-    def opt_func(gamma, data, means):
-        #Optimization function for gamma parameter optimization.
-        start_idx = 150
-        end_idx = 500
-        logI = means[:, 3]
-        I = np.exp(logI)
-        logIp = means[:, 4]
-        Ip = I * logIp
-        beta = means[:, 9]
-        data = np.exp(data[start_idx:end_idx, 0])
-        
-        x_offset = -scipy.special.logit(beta_prior_mean)
-        y_offset = 0.0
-        slope = args.sigmoid_slope
-        
-        beta_link = scipy.special.expit(slope * (beta - x_offset)) + y_offset
-        
-        S_gamma = (1000*(gamma*I + Ip)/(beta_link*I)).reshape(-1, step).mean(axis=1)[start_idx:end_idx]
-        
-        #Compute sqrt( sum ( (S - S(gamma))**2 ) )
-        return np.sqrt( ( (data - S_gamma)**2 ).sum() )
 
     #beta_process_lengthscale = 75, beta_process_diffusion = 0.05, x_process_diffusion = 0.05, ode_measurement_cov = 5e-7, data_measurement_cov = 1e-9, gamma = 0.06, beta_prior_mean = 0.1, sir_0 = np.array(SIR_data[0, :3]), init_sir_vel = 1e-3, init_beta_vel = 0.0, save=False
     #function to call while optimizing
     
     f = lambda x1, x2, x3, save : get_states(data_measurement_cov = x1,
                                    gamma = x2,
-                                   beta_process_diffusion=0.05,#0.01
-                                   x_process_diffusion=0.05,#0.01
+                                   beta_process_diffusion=0.001,#0.01
+                                   x_process_diffusion=0.01,#0.01
                                    ode_measurement_cov = x3,#5e-7
                                    beta_prior_mean = beta_prior_mean,
                                    beta_process_lengthscale = lengthscale,
                                    save = save)
     
-    
-    optim = True
+    optim = False
     
     if optim:
         
@@ -519,9 +503,9 @@ def main():
             logging.info(f"Initial Q : {Q_cov}")
             logging.info(f"Initial gamma : {gamma}")
             
-            for _ in range(3):
+            for _ in range(6):
                 
-                for _ in range(4): #6 iterations is usually fine
+                for _ in range(1): #6 iterations is usually fine
                     #expectation step
                     means, covs, lik = f(R_cov, gamma, Q_cov, False)
                     #maximization step
@@ -535,7 +519,7 @@ def main():
 
 
                 #Second, we optimize Q
-                for _ in range(4):
+                for _ in range(1):
                     #expectation step
                     means, covs, lik = f(R_cov, gamma, Q_cov, False)
 
