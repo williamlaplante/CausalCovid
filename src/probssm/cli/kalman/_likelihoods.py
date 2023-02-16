@@ -595,6 +595,7 @@ class LogSIRDLikelihood(object):
 
         return np.hstack([dx_dx, dx_dbeta])
 
+
 class LogSIRLikelihood(object):
     def __init__(self, prior, ode_parameters, beta_link_fn, beta_link_fn_deriv) -> None:
 
@@ -703,6 +704,127 @@ class LogSIRLikelihood(object):
         return np.hstack([dx_dx, dx_dbeta])
 
 
+
+class LogSIRSLikelihood(object):
+    def __init__(self, prior, ode_parameters, beta_link_fn, beta_link_fn_deriv) -> None:
+
+        self.prior = prior
+
+        self.gamma = ode_parameters["gamma"]
+        self.eta = ode_parameters["eta"]
+        self.population_count = ode_parameters["population_count"]
+
+        self.beta_link_fn = beta_link_fn
+        self.beta_link_fn_deriv = beta_link_fn_deriv
+
+        self.rhs = probssm.ivp.sirs_rhs
+        self.drhs_dsirs = probssm.ivp.sirs_jac_x
+        self.drhs_dbeta = probssm.ivp.sirs_jac_beta
+
+    def check_jacobians(self, t, point, beta, m):
+        """Check jacobians by finite differences."""
+
+        x_fct = lambda eps: self.rhs(
+            t,
+            y=point + eps,
+            beta=beta,
+            gamma=self.gamma,
+            eta = self.eta,
+            population_count=self.population_count,
+        )
+        beta_fct = lambda eps: self.rhs(
+            t,
+            y=point,
+            beta=beta + eps,
+            gamma=self.gamma,
+            eta = self.eta,
+            population_count=self.population_count,
+        )
+
+        meas_fct = lambda eps: self.measure_ode(t, m + eps)
+
+        x_jac = self.drhs_dsirs(
+            t,
+            y=point,
+            beta=beta,
+            gamma=self.gamma,
+            eta = self.eta,
+            population_count=self.population_count,
+        )
+        beta_jac = self.drhs_dbeta(
+            t,
+            y=point,
+            beta=beta,
+            gamma=self.gamma,
+            eta = self.eta,
+            population_count=self.population_count,
+        )
+
+        meas_jac = self.measure_ode_jacobian(t, m)
+
+        probssm.test_jacobian(dim=point.size, jacobian=x_jac, function=x_fct)
+        probssm.test_jacobian(dim=1, jacobian=beta_jac, function=beta_fct)
+        probssm.test_jacobian(dim=m.size, jacobian=meas_jac, function=meas_fct)
+
+    def measure_ode(self, t, state):
+        x = self.prior.proj2process(0) @ state
+        beta = self.prior.proj2process(1) @ state
+
+        E0_x = self.prior.proj2coord(proc=0, coord=0)
+        E1_x = self.prior.proj2coord(proc=0, coord=1)
+        E0_beta = self.prior.proj2coord(proc=1, coord=0)
+
+        return (np.exp(E0_x @ x) * (E1_x @ x)) - self.rhs(
+            t,
+            y=np.exp(E0_x @ x),
+            beta=self.beta_link_fn(E0_beta @ beta).squeeze(),
+            gamma=self.gamma,
+            eta = self.eta,
+            population_count=self.population_count,
+        )
+
+    def measure_ode_jacobian(self, t, state):
+
+        x = self.prior.proj2process(0) @ state
+        beta = self.prior.proj2process(1) @ state
+
+        E0_x = self.prior.proj2coord(proc=0, coord=0)
+        E1_x = self.prior.proj2coord(proc=0, coord=1)
+        E0_beta = self.prior.proj2coord(proc=1, coord=0)
+
+        dx_dx = (
+            ((np.exp(E0_x @ x).reshape(-1, 1) * E0_x) * (E1_x @ x).reshape(-1, 1))
+            + (np.exp(E0_x @ x).reshape(-1, 1) * E1_x)
+            - self.drhs_dsirs(
+                t,
+                y=np.exp(E0_x @ x),
+                beta=self.beta_link_fn(E0_beta @ beta).squeeze(),
+                gamma=self.gamma,
+                eta=self.eta,
+                population_count=self.population_count,
+            )
+            @ (np.exp(E0_x @ x).reshape(-1, 1) * E0_x)
+        )
+        dx_dbeta = (
+            -self.drhs_dbeta(
+                t,
+                y=np.exp(E0_x @ x),
+                beta=self.beta_link_fn(E0_beta @ beta).squeeze(),
+                gamma=self.gamma,
+                eta=self.eta,
+                population_count=self.population_count,
+            )
+            * self.beta_link_fn_deriv(E0_beta @ beta).squeeze()
+            @ E0_beta
+        )
+
+        return np.hstack([dx_dx, dx_dbeta])
+
+
+    
+    
+    
+    
 class SIRDVLikelihood(object):
     def __init__(self, prior, ode_parameters, beta_link_fn, beta_link_fn_deriv) -> None:
 

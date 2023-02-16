@@ -147,6 +147,49 @@ def sir_jac_beta(t, y, beta, gamma, population_count):
     return d_dbeta
 
 
+
+#---------------------------------SIRS Model----------------------------------#
+
+def sirs_rhs(t, y, beta, gamma, eta, population_count):
+    """RHS for SIR model"""
+
+    S, I, R = y
+    
+    S_next = -beta * S * I / population_count + eta * R
+    I_next = beta * S * I / population_count - gamma * I
+    R_next = gamma * I - eta * R
+
+    return np.array([S_next, I_next, R_next])
+
+
+def sirs_jac_x(t, y, beta, gamma, eta, population_count):
+    """Jacobian for SIR model w.r.t. the state"""
+    S, I, R = y
+    d_dS = np.array(
+        [-beta * I / population_count, -beta * S / population_count, eta]
+    )
+    d_dI = np.array(
+        [
+            beta * I / population_count,
+            beta * S / population_count - gamma,
+            0.0,
+        ]
+    )
+    d_dR = np.array([0.0, gamma, -eta])
+    
+    jac_matrix = np.array([d_dS, d_dI, d_dR])
+    
+    return jac_matrix
+
+
+def sirs_jac_beta(t, y, beta, gamma, eta, population_count):
+    """Jacobian for SIR model w.r.t. beta"""
+    S, I, R = y
+    d_dbeta = np.array(
+        [[-S * I / population_count], [S * I / population_count], [0.0]]
+    )
+    return d_dbeta
+
 #---------------------------------SIRDV Model--------------------------------#
 def sirdv_rhs(t, y, V, beta, gamma, eta, population_count):
     """RHS for SIRD model"""
