@@ -460,7 +460,7 @@ def main():
     Q_cov = 2.0345311243958814e-05
     
     gamma = 1/22.14 #gamma parameter in the ODE model
-    eta = 1/90 #about 4 months of immunity post-infection
+    eta = 1/120 #about 4 months of immunity post-infection
     
     #Useful functions  
     
