@@ -136,12 +136,14 @@ def main():
 
 
 
-    def get_states(beta_process_lengthscale = 75, beta_process_diffusion = 0.05, x_process_diffusion = 0.05, ode_measurement_cov = 5e-7, data_measurement_cov = 1e-9, gamma = 0.06, eta = 0.005, beta_prior_mean = 0.1, sir_0 = np.array(SIR_data[0, :3]), init_sir_vel = 1e-3, init_beta_vel = 0.0, save=False):
+    def get_states(beta_process_lengthscale = 75, beta_process_diffusion = 0.05, x_process_diffusion = 0.05, ode_measurement_cov = 5e-7, data_measurement_cov = 1e-9, gamma = 0.06, eta = 0.005, beta_prior_mean = 0.1, sir_0 = np.array(SIR_data[0, :3]), init_sir_vel = 1e-3, init_beta_vel = 0.0, sigma_sir_init = 0.01, sigma_velocity = 0.01, sigma_beta_init = None, save=False):
+        
+
+        #------------------------Prior Transitions--------------------------------------------#
         
         forward_implementation = args.pn_forward_implementation
         backward_implementation = args.pn_backward_implementation
-
-        #Specify 
+        
         ode_transition = pn.randprocs.markov.integrator.IntegratedWienerTransition(
             num_derivatives=args.x_process_ordint,
             wiener_process_dimension=STATE_DIM,
@@ -170,15 +172,15 @@ def main():
             forward_implementation=forward_implementation,
             backward_implementation=backward_implementation,
         )
-
-        # Set up initial conditions
-
-        # ##################################################################################
-        # ODE LIKELIHOOD
-        # ##################################################################################
-
-        # Link functions
-
+        
+        
+        #--------------------- Link Functions ----------------------------------------------#
+        
+        beta_link_fn = lambda x : np.exp(x)
+        beta_link_fn_deriv = lambda x : np.exp(x)
+        beta_inverse_link_fn = lambda x : np.log(x)
+        
+        """
         sigmoid_x_offset = -scipy.special.logit(beta_prior_mean)
         beta_link_fn = functools.partial(
             probssm.util.sloped_sigmoid,
@@ -193,10 +195,14 @@ def main():
         beta_inverse_link_fn = (
             lambda x: (scipy.special.logit(x) + sigmoid_x_offset) / args.sigmoid_slope
         )
+        """
 
         assert np.isclose(beta_link_fn(beta_inverse_link_fn(beta_prior_mean)), beta_prior_mean)
-        assert np.isclose(beta_link_fn(0.0), beta_prior_mean)
+        #assert np.isclose(beta_link_fn(0.0), beta_prior_mean)
 
+        #--------------------- Initial Conditions -----------------------------------------#
+
+        #ODE setup
         ode_parameters = {"gamma": gamma,"population_count": population, "eta" : eta}
 
         ode_likelihood = LogSIRSLikelihood(
@@ -224,15 +230,21 @@ def main():
         init_mean[process_idcs[BETA_PROCESS_NUM]["state_d1"]] = init_beta_vel
 
         # Cov
-        sigma_sir = 0.001 * np.ones_like(sir_0)
+        sigma_sir = sigma_sir_init * np.ones_like(sir_0)
 
         # Initialize the beta process at its stationary covariance
         stationary_beta_cov = scipy.linalg.solve_continuous_lyapunov(
             lf_transition.drift_matrix,
             -(lf_transition.dispersion_matrix @ lf_transition.dispersion_matrix.T),
         )
-        sigma_beta = stationary_beta_cov[0, 0]
-        sigma_velocity = 0.001
+        
+        if save : logging.info("Stationary covariance of beta :\n {}".format(stationary_beta_cov))
+        
+        if sigma_beta_init is None:
+            sigma_beta = stationary_beta_cov[0, 0]
+        else:
+            sigma_beta = sigma_beta_init
+        
 
         init_marginal_vars = 1e-7 * np.ones((prior_transition.state_dimension,))
         init_marginal_vars[process_idcs[X_PROCESS_NUM]["state_d0"]] = sigma_sir
@@ -243,8 +255,12 @@ def main():
         init_marginal_vars[process_idcs[BETA_PROCESS_NUM]["state_d1"]] = sigma_velocity
 
         init_cov = np.diag(init_marginal_vars)
-
+        
         initrv = randvars.Normal(init_mean, init_cov)
+        
+        if save : 
+            logging.info(f"Initial Mean :\n {init_mean}")
+            logging.info(f"Marginal Variances (Covariance is diag of this) :\n {init_marginal_vars}")
         
         time_domain = (0.0, float(num_covid_data_points + args.num_extrapolate))
         
@@ -265,9 +281,7 @@ def main():
 
         ode_likelihood.check_jacobians(_t, _point, _beta, _m)
 
-        # ##################################################################################
-        # BUILD MODEL
-        # ##################################################################################
+        #-------------------------- Build Model --------------------------------------------#
 
         # ODE measurements
         measurement_matrix_ode = ode_measurement_cov * np.eye(STATE_DIM)
@@ -302,9 +316,7 @@ def main():
             backward_implementation=backward_implementation,
         )
 
-        # ##################################################################################
-        # Run algorithm
-        # ##################################################################################
+        #----------------------- Run Algorithm --------------------------------------------#
         data_grid = np.array(train_idcs, copy=True, dtype=np.float64)
         ode_grid = np.arange(*time_domain, step=args.filter_step_size, dtype=np.float64)
         merged_locations = probssm.util.unions1d(data_grid, ode_grid)
@@ -361,20 +373,18 @@ def main():
         means = np.stack([s.mean for s in posterior.states])
         covs = np.stack([s.cov for s in posterior.states])
 
-        lik = 0
+        data_lik = 0
+        ode_lik = 0
         data_idx = 0
         
         for i,loc in enumerate(merged_locations):
             if np.in1d(loc, data_grid):
-                #lik+=np.exp(means[i,0]) - means[i,0] * np.exp(SIR_data[data_idx, 0])
-                #lik+= np.abs(means[i,0] - SIR_data[data_idx,0])
-
-                lik += stats.norm.logpdf(SIR_data[data_idx,0],
+                data_lik += stats.norm.logpdf(SIR_data[data_idx,0],
                                          loc=means[i,0],
                                          scale=np.sqrt(covs[i,0,0]))
                 data_idx += 1
-        #lik /= len(SIR_data[:,0])
         
+        lik = data_lik
         
         if args.num_samples is not None and args.num_samples > 0:
             logging.info(f"Drawing {args.num_samples} samples from posterior...")
@@ -443,61 +453,42 @@ def main():
    
         return means, covs, lik
     
-    #EM algorithm
     
     #hyperparameters
     assert np.isclose(args.filter_step_size, 1/24)
     step = 1+int(1/args.filter_step_size)
  
-    beta_prior_mean = 0.1 #initial conditions for beta
+    beta_prior_mean = 0.05 #initial mean for beta
     lengthscale = 72 # 72 hours = 3 * 24h = 3 days
     beta_process_diffusion=0.001
     x_process_diffusion=0.01
+    sigma_sir_init = 0.01 #initial variance for sir
+    sigma_beta_init = None #initial variance for beta; if None, algo uses stationary variance.
+    gamma = 1/22.14 #gamma parameter in the ODE model
+    eta = 1/182 #about 6-8 months of immunity post-infection (at least 6 months)
     
 
     #parameters
-    R_cov = 1.0098897572165454e-08
-    Q_cov = 2.0345311243958814e-05
+    data_cov = (1/4) * 1.0098897572165454e-08 #data measurement cov
+    ode_cov = (1/5) * 2.0345311243958814e-05 #ode measurement cov
     
-    gamma = 1/22.14 #gamma parameter in the ODE model
-    eta = 1/120 #about 4 months of immunity post-infection
-    
-    #Useful functions  
-    
-    def transformed_states(arr):
-        logS = arr[:, 0]
-        S = np.exp(logS)
-        logSp = arr[:, 1]
-        Sp = S * logSp
-        logI = arr[:, 3]
-        I = np.exp(logI)
-        logIp = arr[:, 4]
-        Ip = I * logIp
-        logR = arr[:, 6]
-        R = np.exp(logR)
-        logRp = arr[:, 7]
-        Rp = R * logRp
-        beta = arr[:, 9]
-        x_offset = -scipy.special.logit(beta_prior_mean)
-        y_offset = 0.0
-        slope = args.sigmoid_slope
-        beta_link = scipy.special.expit(slope * (beta - x_offset)) + y_offset
-        return [S, Sp, I, Ip, R, Rp, beta]
-
-    #beta_process_lengthscale = 75, beta_process_diffusion = 0.05, x_process_diffusion = 0.05, ode_measurement_cov = 5e-7, data_measurement_cov = 1e-9, gamma = 0.06, beta_prior_mean = 0.1, sir_0 = np.array(SIR_data[0, :3]), init_sir_vel = 1e-3, init_beta_vel = 0.0, save=False
     #function to call while optimizing
-    
-    f = lambda x1, x2, x3, save : get_states(data_measurement_cov = x1,
-                                   gamma = x2,
+    f = lambda x1, x2, save : get_states(data_measurement_cov = x1,
+                                   gamma = gamma,
                                    eta = eta,
                                    beta_process_diffusion=beta_process_diffusion,
                                    x_process_diffusion=x_process_diffusion,
-                                   ode_measurement_cov = x3,
+                                   ode_measurement_cov = x2,
                                    beta_prior_mean = beta_prior_mean,
                                    beta_process_lengthscale = lengthscale,
+                                   sigma_sir_init = sigma_sir_init,
+                                   sigma_beta_init = sigma_beta_init,
                                    save = save)
     
-    optim = False
+    
+    #EM algorithm
+
+    optim = False #Set True to optimize
     
     if optim:
         
@@ -505,34 +496,31 @@ def main():
         while total_optim_step<1:
             
             #First, we optimize R
-            logging.info(f"Initial R : {R_cov}")
-            logging.info(f"Initial Q : {Q_cov}")
+            logging.info(f"Initial data cov : {data_cov}")
+            logging.info(f"Initial ODE cov : {ode_cov}")
             
-            for _ in range(6):
+            for _ in range(10):
                 
-                for _ in range(1): #6 iterations is usually fine
+                for _ in range(1): 
                     #expectation step
-                    means, covs, lik = f(R_cov, gamma, Q_cov, False)
+                    means, covs, lik = f(data_cov, ode_cov, False)
                     #maximization step
-                    #R_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1) #MLE for R -> Maximizes likelihood
-                    R_cov = (covs[::step, 0,0] + means[::step, 0]**2 - 2*SIR_data[:,0]*means[::step,0] + SIR_data[:,0]**2).mean()
+                    #data_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1) #MLE for R -> Maximizes likelihood
+                    data_cov = (covs[::step, 0,0] + means[::step, 0]**2 - 2*SIR_data[:,0]*means[::step,0] + SIR_data[:,0]**2).mean()
 
-                    logging.info(f"Current R : {R_cov}")
-                    logging.info(f"Current Q : {Q_cov}")
-                    logging.info(f"Current Log Likelihood : {lik}")
+                    logging.info(f"Current R : {data_cov}")
+                    logging.info(f"Current Q : {ode_cov}")
+                    logging.info(f"Current Data Likelihood : {lik}")
 
 
-
-                #Second, we optimize Q
                 for _ in range(1):
                     #expectation step
-                    means, covs, lik = f(R_cov, gamma, Q_cov, False)
+                    means, covs, lik = f(data_cov, ode_cov, False)
 
-                    Q_cov = covs[:,[2,5,8],[2,5,8]].mean() #sample average of lambda from GP of x''(t)
-
-                    logging.info(f"Current R : {R_cov}")
-                    logging.info(f"Current Q : {Q_cov}")
-                    logging.info(f"Current Log Likelihood : {lik}")
+                    ode_cov = covs[:,[2,5,8],[2,5,8]].mean() #sample average of lambda from GP of x''(t)
+                    logging.info(f"Current R : {data_cov}")
+                    logging.info(f"Current Q : {ode_cov}")
+                    logging.info(f"Current Data Likelihood : {lik}")
          
             total_optim_step+=1
 
@@ -541,7 +529,7 @@ def main():
     
     #Run one more time and save the states for future analysis
     logging.info("Running algorithm with estimated parameters.")
-    _, _, _ = f(R_cov, gamma, Q_cov, True)
+    _, _, _ = f(data_cov, ode_cov, True)
     
     return
 
