@@ -17,4 +17,4 @@
 --filter-smoothing
 1
 --filter-step-size
-0.041666666
+0.16666666666

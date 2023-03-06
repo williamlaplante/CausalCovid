@@ -484,7 +484,7 @@ def main():
     
     f = lambda x1, x2, x3, save : get_states(data_measurement_cov = x1,
                                    gamma = x2,
-                                   beta_process_diffusion=0.001,#0.01
+                                   beta_process_diffusion=0.01,#0.01
                                    x_process_diffusion=0.01,#0.01
                                    ode_measurement_cov = x3,#5e-7
                                    beta_prior_mean = beta_prior_mean,

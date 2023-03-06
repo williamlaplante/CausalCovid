@@ -455,34 +455,40 @@ def main():
     
     
     #hyperparameters
-    assert np.isclose(args.filter_step_size, 1/24)
+    #assert np.isclose(args.filter_step_size, 1/24)
     step = 1+int(1/args.filter_step_size)
- 
-    beta_prior_mean = 0.05 #initial mean for beta
-    lengthscale = 72 # 72 hours = 3 * 24h = 3 days
-    beta_process_diffusion=0.001
-    x_process_diffusion=0.01
+     
+    beta_prior_mean = 0.1 #initial mean for beta
+    lengthscale = 168 # hours
+    beta_process_diffusion= 0.005
+    x_process_diffusion= 0.005
     sigma_sir_init = 0.01 #initial variance for sir
     sigma_beta_init = None #initial variance for beta; if None, algo uses stationary variance.
+    init_sir_vel = 1e-5
+    init_beta_vel = 1e-5
+    sigma_velocity = 0.01
     gamma = 1/22.14 #gamma parameter in the ODE model
     eta = 1/182 #about 6-8 months of immunity post-infection (at least 6 months)
     
 
     #parameters
-    data_cov = (1/4) * 1.0098897572165454e-08 #data measurement cov
-    ode_cov = (1/5) * 2.0345311243958814e-05 #ode measurement cov
+    data_cov = 5e-9  #data measurement cov
+    ode_cov = 1e-6 #ode measurement cov -> we set this to the value recommended in the paper from Schmidt
+
     
     #function to call while optimizing
-    f = lambda x1, x2, save : get_states(data_measurement_cov = x1,
+    f = lambda x1,x2,x3,x4, save : get_states(data_measurement_cov = x1,
                                    gamma = gamma,
                                    eta = eta,
-                                   beta_process_diffusion=beta_process_diffusion,
-                                   x_process_diffusion=x_process_diffusion,
+                                   beta_process_diffusion=x3,
+                                   x_process_diffusion=x4,
                                    ode_measurement_cov = x2,
                                    beta_prior_mean = beta_prior_mean,
                                    beta_process_lengthscale = lengthscale,
                                    sigma_sir_init = sigma_sir_init,
                                    sigma_beta_init = sigma_beta_init,
+                                   init_sir_vel = init_sir_vel,
+                                   sigma_velocity = sigma_velocity,
                                    save = save)
     
     
@@ -498,30 +504,38 @@ def main():
             #First, we optimize R
             logging.info(f"Initial data cov : {data_cov}")
             logging.info(f"Initial ODE cov : {ode_cov}")
+            logging.info(f"Initial x process diffusion : {x_process_diffusion}")
+            logging.info(f"Initial beta process diffusion : {beta_process_diffusion}")    
             
-            for _ in range(10):
+            for _ in range(100):
                 
                 for _ in range(1): 
                     #expectation step
-                    means, covs, lik = f(data_cov, ode_cov, False)
+                    means, covs, lik = f(data_cov,ode_cov,beta_process_diffusion,x_process_diffusion, False)
                     #maximization step
                     #data_cov = ((SIR_data[:,0] - means[::step,0])**2).sum()/(len(SIR_data[:,0]) - 1) #MLE for R -> Maximizes likelihood
                     data_cov = (covs[::step, 0,0] + means[::step, 0]**2 - 2*SIR_data[:,0]*means[::step,0] + SIR_data[:,0]**2).mean()
 
-                    logging.info(f"Current R : {data_cov}")
-                    logging.info(f"Current Q : {ode_cov}")
+                    logging.info(f"Current data covariance : {data_cov}")
+                    logging.info(f"Current ode covariance : {ode_cov}")
+                    logging.info(f"Current x process diffusion : {x_process_diffusion}")
+                    logging.info(f"Current beta process diffusion : {beta_process_diffusion}")
                     logging.info(f"Current Data Likelihood : {lik}")
 
 
                 for _ in range(1):
                     #expectation step
-                    means, covs, lik = f(data_cov, ode_cov, False)
+                    '''
+                    means, covs, lik = f(data_cov,ode_cov,beta_process_diffusion,x_process_diffusion, False)
 
-                    ode_cov = covs[:,[2,5,8],[2,5,8]].mean() #sample average of lambda from GP of x''(t)
-                    logging.info(f"Current R : {data_cov}")
-                    logging.info(f"Current Q : {ode_cov}")
+                    x_process_diffusion = covs[:,[2,5,8],[2,5,8]].mean() #sample average of lambda from GP of x''(t)
+                    
+                    logging.info(f"Current data covariance : {data_cov}")
+                    logging.info(f"Current ode covariance : {ode_cov}")
+                    logging.info(f"Current x process diffusion : {x_process_diffusion}")
+                    logging.info(f"Current beta process diffusion : {beta_process_diffusion}")
                     logging.info(f"Current Data Likelihood : {lik}")
-         
+                    '''
             total_optim_step+=1
 
 
@@ -529,7 +543,7 @@ def main():
     
     #Run one more time and save the states for future analysis
     logging.info("Running algorithm with estimated parameters.")
-    _, _, _ = f(data_cov, ode_cov, True)
+    _, _, _ = f(data_cov,ode_cov,beta_process_diffusion,x_process_diffusion, True)
     
     return
 
